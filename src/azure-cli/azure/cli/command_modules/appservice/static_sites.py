@@ -3,12 +3,20 @@
 # Licensed under the MIT License. See License.txt in the project root for license information.
 # --------------------------------------------------------------------------------------------
 
+
+import time
+import threading
+import sys
+
 from azure.cli.core.commands.client_factory import get_mgmt_service_client
-from azure.cli.core.util import sdk_no_wait
+from azure.cli.core.util import sdk_no_wait, open_page_in_browser
+from azure.cli.core.azclierror import ResourceNotFoundError
+
 from knack.util import CLIError
 from knack.log import get_logger
 
 from .utils import normalize_sku_for_staticapp, raise_missing_token_suggestion
+
 
 logger = get_logger(__name__)
 
@@ -346,3 +354,20 @@ def _find_user_id_and_authentication_provider(client, resource_group_name, name,
         raise CLIError("user details and authentication provider was not found.")
 
     return user_id, authentication_provider
+
+def view_in_browser(cmd, resource_group_name, name):
+    url = _get_url(cmd, resource_group_name, name)
+    open_page_in_browser(url)
+
+def _get_url(cmd, resource_group_name, name):
+    client = _get_staticsites_client_factory(cmd.cli_ctx)
+    if not resource_group_name:
+        resource_group_name = _get_resource_group_name_of_staticsite(client, name)
+    site = client.get_static_site(resource_group_name, name)
+    if not site:
+        raise ResourceNotFoundError("Unable to find App {} in resource group {}.".format(name, resource_group_name))
+    if len(site.custom_domains) == 0:
+        url = site.default_hostname
+    else:
+        url = site.custom_domains[0]
+    return url
