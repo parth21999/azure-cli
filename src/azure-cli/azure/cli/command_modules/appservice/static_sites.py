@@ -377,13 +377,14 @@ def assign_identity(cmd, resource_group_name, name, assign_identities=None, role
         return client.get_static_site(resource_group_name, name)
 
     def setter(static_site):
-        if not hasattr(static_site, 'identity'):
-            setattr(static_site, 'identity', None)
-        if static_site.identity and static_site.identity.type == ResourceIdentityType.system_assigned_user_assigned:
+        id = None
+        if "identity" in static_site.additional_properties:
+            id = static_site.additional_properties.identity
+        if id and id.type == ResourceIdentityType.system_assigned_user_assigned:
             identity_types = ResourceIdentityType.system_assigned_user_assigned
-        elif static_site.identity and static_site.identity.type == ResourceIdentityType.system_assigned and external_identities:
+        elif id and id.type == ResourceIdentityType.system_assigned and external_identities:
             identity_types = ResourceIdentityType.system_assigned_user_assigned
-        elif static_site.identity and static_site.identity.type == ResourceIdentityType.user_assigned and enable_local_identity:
+        elif id and id.type == ResourceIdentityType.user_assigned and enable_local_identity:
             identity_types = ResourceIdentityType.system_assigned_user_assigned
         elif external_identities and enable_local_identity:
             identity_types = ResourceIdentityType.system_assigned_user_assigned
@@ -392,23 +393,24 @@ def assign_identity(cmd, resource_group_name, name, assign_identities=None, role
         else:
             identity_types = ResourceIdentityType.system_assigned
 
-        if static_site.identity:
-            static_site.identity.type = identity_types
+        if id:
+            id.type = identity_types
         else:
-            static_site.identity = ManagedServiceIdentity(type=identity_types)
+            id = ManagedServiceIdentity(type=identity_types)
         if external_identities:
-            if not static_site.identity.user_assigned_identities:
-                static_site.identity.user_assigned_identities = {}
+            if not id.user_assigned_identities:
+                id.user_assigned_identities = {}
             for identity in external_identities:
-                static_site.identity.user_assigned_identities[identity] = UserAssignedIdentitiesValue()
-       
-        new_site2 = client.get_static_site(resource_group_name, name)
+                id.user_assigned_identities[identity] = UserAssignedIdentitiesValue()
+        
+        static_site.additional_properties["identity"] = id
+        new_site = sdk_no_wait(no_wait, client.update_static_site,
+                       resource_group_name=resource_group_name, name=name,
+                       static_site_envelope=static_site)
 
-        print(static_site)
-        new_site = sdk_no_wait(no_wait, client.create_or_update_static_site,
-                    resource_group_name=resource_group_name, name=name,
-                    static_site_envelope=static_site)
+        setattr(new_site, "identity", new_site.additional_properties["identity"])
 
+        print(new_site)
         return new_site
 
     from azure.cli.core.commands.arm import assign_identity as _assign_identity
@@ -421,7 +423,7 @@ def remove_identity():
 
 def show_identity(cmd, resource_group_name, name, slot=None):
     static_site = show_staticsite(cmd, name, resource_group_name)
-    return static_site.identity
+    return static_site.addition_properties.identity
 
 # def remove_identity(cmd, resource_group_name, name, remove_identities=None, slot=None):
 #     IdentityType = cmd.get_models('ManagedServiceIdentityType')
