@@ -4,7 +4,7 @@
 # --------------------------------------------------------------------------------------------
 
 from azure.cli.core.commands.client_factory import get_mgmt_service_client
-from azure.cli.core.util import sdk_no_wait
+from azure.cli.core.util import hash_string, sdk_no_wait
 from knack.util import CLIError
 from knack.log import get_logger
 
@@ -346,3 +346,126 @@ def _find_user_id_and_authentication_provider(client, resource_group_name, name,
         raise CLIError("user details and authentication provider was not found.")
 
     return user_id, authentication_provider
+
+def _build_identities_info(identities):
+    from ._appservice_utils import MSI_LOCAL_ID
+    identities = identities or []
+    identity_types = []
+    if not identities or MSI_LOCAL_ID in identities:
+        identity_types.append('SystemAssigned')
+    external_identities = [x for x in identities if x != MSI_LOCAL_ID]
+    if external_identities:
+        identity_types.append('UserAssigned')
+    identity_types = ','.join(identity_types)
+    info = {'type': identity_types}
+    if external_identities:
+        info['userAssignedIdentities'] = {e: {} for e in external_identities}
+    return (info, identity_types, external_identities, 'SystemAssigned' in identity_types)
+
+
+def assign_identity(cmd, resource_group_name, name, assign_identities=None, role='Contributor', scope=None, no_wait=False):
+    ManagedServiceIdentity, ResourceIdentityType = cmd.get_models('ManagedServiceIdentity',
+                                                                  'ManagedServiceIdentityType')
+    UserAssignedIdentitiesValue = cmd.get_models('Components1Jq1T4ISchemasManagedserviceidentityPropertiesUserassignedidentitiesAdditionalproperties')  # pylint: disable=line-too-long
+    _, _, external_identities, enable_local_identity = _build_identities_info(assign_identities)
+
+    client = _get_staticsites_client_factory(cmd.cli_ctx)
+    if not resource_group_name:
+        resource_group_name = _get_resource_group_name_of_staticsite(client, name)
+
+    def getter():
+        return client.get_static_site(resource_group_name, name)
+
+    def setter(static_site):
+        if not hasattr(static_site, 'identity'):
+            setattr(static_site, 'identity', None)
+        if static_site.identity and static_site.identity.type == ResourceIdentityType.system_assigned_user_assigned:
+            identity_types = ResourceIdentityType.system_assigned_user_assigned
+        elif static_site.identity and static_site.identity.type == ResourceIdentityType.system_assigned and external_identities:
+            identity_types = ResourceIdentityType.system_assigned_user_assigned
+        elif static_site.identity and static_site.identity.type == ResourceIdentityType.user_assigned and enable_local_identity:
+            identity_types = ResourceIdentityType.system_assigned_user_assigned
+        elif external_identities and enable_local_identity:
+            identity_types = ResourceIdentityType.system_assigned_user_assigned
+        elif external_identities:
+            identity_types = ResourceIdentityType.user_assigned
+        else:
+            identity_types = ResourceIdentityType.system_assigned
+
+        if static_site.identity:
+            static_site.identity.type = identity_types
+        else:
+            static_site.identity = ManagedServiceIdentity(type=identity_types)
+        if external_identities:
+            if not static_site.identity.user_assigned_identities:
+                static_site.identity.user_assigned_identities = {}
+            for identity in external_identities:
+                static_site.identity.user_assigned_identities[identity] = UserAssignedIdentitiesValue()
+       
+        new_site2 = client.get_static_site(resource_group_name, name)
+
+        print(static_site)
+        new_site = sdk_no_wait(no_wait, client.create_or_update_static_site,
+                    resource_group_name=resource_group_name, name=name,
+                    static_site_envelope=static_site)
+
+        return new_site
+
+    from azure.cli.core.commands.arm import assign_identity as _assign_identity
+    static_site = _assign_identity(cmd.cli_ctx, getter, setter, role, scope)
+    return static_site.identity
+
+
+def remove_identity():
+    return None
+
+def show_identity(cmd, resource_group_name, name, slot=None):
+    static_site = show_staticsite(cmd, name, resource_group_name)
+    return static_site.identity
+
+# def remove_identity(cmd, resource_group_name, name, remove_identities=None, slot=None):
+#     IdentityType = cmd.get_models('ManagedServiceIdentityType')
+#     UserAssignedIdentitiesValue = cmd.get_models('Components1Jq1T4ISchemasManagedserviceidentityPropertiesUserassignedidentitiesAdditionalproperties')  # pylint: disable=line-too-long
+#     _, _, external_identities, remove_local_identity = _build_identities_info(remove_identities)
+
+#     def getter():
+#         return _generic_site_operation(cmd.cli_ctx, resource_group_name, name, 'get', slot)
+
+#     def setter(webapp):
+#         if webapp.identity is None:
+#             return webapp
+#         to_remove = []
+#         existing_identities = {x.lower() for x in list((webapp.identity.user_assigned_identities or {}).keys())}
+#         if external_identities:
+#             to_remove = {x.lower() for x in external_identities}
+#             non_existing = to_remove.difference(existing_identities)
+#             if non_existing:
+#                 raise CLIError("'{}' are not associated with '{}'".format(','.join(non_existing), name))
+#             if not list(existing_identities - to_remove):
+#                 if webapp.identity.type == IdentityType.user_assigned:
+#                     webapp.identity.type = IdentityType.none
+#                 elif webapp.identity.type == IdentityType.system_assigned_user_assigned:
+#                     webapp.identity.type = IdentityType.system_assigned
+
+#         webapp.identity.user_assigned_identities = None
+#         if remove_local_identity:
+#             webapp.identity.type = (IdentityType.none
+#                                     if webapp.identity.type == IdentityType.system_assigned or
+#                                     webapp.identity.type == IdentityType.none
+#                                     else IdentityType.user_assigned)
+
+#         if webapp.identity.type not in [IdentityType.none, IdentityType.system_assigned]:
+#             webapp.identity.user_assigned_identities = {}
+#         if to_remove:
+#             for identity in list(existing_identities - to_remove):
+#                 webapp.identity.user_assigned_identities[identity] = UserAssignedIdentitiesValue()
+#         else:
+#             for identity in list(existing_identities):
+#                 webapp.identity.user_assigned_identities[identity] = UserAssignedIdentitiesValue()
+
+#         poller = _generic_site_operation(cmd.cli_ctx, resource_group_name, name, 'begin_create_or_update', slot, webapp)
+#         return LongRunningOperation(cmd.cli_ctx)(poller)
+
+#     from azure.cli.core.commands.arm import assign_identity as _assign_identity
+#     webapp = _assign_identity(cmd.cli_ctx, getter, setter)
+#     return webapp.identity
